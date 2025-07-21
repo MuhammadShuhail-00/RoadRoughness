@@ -2,157 +2,155 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import zipfile
-import tempfile
 import os
+import tempfile
 import joblib
+import matplotlib.pyplot as plt
 import folium
 from folium.plugins import MarkerCluster
 from streamlit_folium import st_folium
 from datetime import timedelta
-import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="Road Roughness Detector", layout="wide")
-st.title("🚗 Road Surface Roughness Classification App")
+# --- UI ---
+st.set_page_config(page_title="Road Roughness Detection", layout="wide")
+st.title("🚗 Road Surface Roughness Detection App")
 
-# Load trained Random Forest model
-model = joblib.load("iri_rf_classifier_cleaned.pkl")
+st.markdown("Upload a **.zip** file containing `Accelerometer.csv`, `Gyroscope.csv`, and `Location.csv`.")
 
-# Define preprocessing + feature extraction function
-def preprocess_and_extract_features(accel_df, gyro_df, gps_df):
-    # Standardize timestamp and sort
-    for df in [accel_df, gyro_df, gps_df]:
-        df.rename(columns={df.columns[0]: "timestamp"}, inplace=True)
-        df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
-        if df["timestamp"].max() > 1e15:
-            df["timestamp"] = df["timestamp"] / 1_000_000
-        df.sort_values("timestamp", inplace=True)
-        df.drop(columns=[col for col in df.columns if "elapsed" in col.lower()], inplace=True)
+# --- Upload zip file ---
+zip_file = st.file_uploader("Upload sensor ZIP file", type="zip")
 
-    # Merge 3 sensors
-    df = pd.merge_asof(accel_df, gyro_df, on="timestamp", direction="nearest", tolerance=50)
-    df = pd.merge_asof(df, gps_df, on="timestamp", direction="nearest", tolerance=200)
-    df.dropna(inplace=True)
-    df.insert(0, "readable_time", pd.to_datetime(df["timestamp"], unit='ms') + timedelta(hours=8))
-
-    # Rename for consistency
-    df.rename(columns={
-        'x_x': 'accel_x',
-        'y_x': 'accel_y',
-        'z_x': 'accel_z',
-        'x_y': 'gyro_x',
-        'y_y': 'gyro_y',
-        'z_y': 'gyro_z'
-    }, inplace=True)
-
-    # Segmenting
-    window_size = 200
-    segments = []
-    for i in range(0, len(df) - window_size, window_size):
-        window = df.iloc[i:i+window_size]
-        if window['speed'].mean() >= 5:
-            y_filtered = window['accel_y'].rolling(window=5, center=True).mean().bfill().ffill()
-            features = {
-                'start_time': window['timestamp'].iloc[0],
-                'end_time': window['timestamp'].iloc[-1],
-                'mean_accel_y': y_filtered.mean(),
-                'std_accel_y': y_filtered.std(),
-                'rms_accel_y': np.sqrt(np.mean(y_filtered**2)),
-                'peak2peak_accel_y': y_filtered.max() - y_filtered.min(),
-                'mean_speed': window['speed'].mean() * 3.6,
-                'elevation_change': window['altitude'].iloc[-1] - window['altitude'].iloc[0] if 'altitude' in window else 0,
-                'gyro_y_std': window['gyro_y'].std(),
-                'gyro_x_std': window['gyro_x'].std(),
-                'latitude': window['latitude'].iloc[-1],
-                'longitude': window['longitude'].iloc[-1]
-            }
-            segments.append(features)
-
-    features_df = pd.DataFrame(segments)
-    features_df["estimated_iri"] = (
-        2.0 * features_df["rms_accel_y"] +
-        0.03 * features_df["mean_speed"] +
-        0.1
-    )
-
-    # Labeling based on IRI thresholds
-    def label_segment(row):
-        iri = row["estimated_iri"]
-        if iri <= 2.0:
-            return "Smooth"
-        elif iri <= 3.5:
-            return "Fair"
-        else:
-            return "Rough"
-    
-    features_df["label"] = features_df.apply(label_segment, axis=1)
-    return df, features_df
-
-# ========================
-# Sidebar Upload
-# ========================
-with st.sidebar:
-    st.header("📂 Upload Raw Sensor Data (ZIP)")
-    uploaded_zip = st.file_uploader("Upload ZIP containing Accelerometer.csv, Gyroscope.csv, Location.csv", type="zip")
-
-# ========================
-# Process if File Uploaded
-# ========================
-if uploaded_zip:
+if zip_file:
     with tempfile.TemporaryDirectory() as tmpdir:
-        zip_path = os.path.join(tmpdir, "data.zip")
+        zip_path = os.path.join(tmpdir, "uploaded.zip")
         with open(zip_path, "wb") as f:
-            f.write(uploaded_zip.read())
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            f.write(zip_file.read())
+
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(tmpdir)
 
-        filenames = os.listdir(tmpdir)
-        accel = pd.read_csv(os.path.join(tmpdir, [f for f in filenames if "Accelerometer" in f][0]))
-        gyro = pd.read_csv(os.path.join(tmpdir, [f for f in filenames if "Gyroscope" in f][0]))
-        gps = pd.read_csv(os.path.join(tmpdir, [f for f in filenames if "Location" in f][0]))
+        # Find sensor files
+        def find_file(keywords):
+            for root, _, files in os.walk(tmpdir):
+                for file in files:
+                    fname = file.lower()
+                    if all(k in fname for k in keywords):
+                        return os.path.join(root, file)
+            return None
 
-        # Extract
-        raw_df, features_df = preprocess_and_extract_features(accel, gyro, gps)
+        accel_path = find_file(["accelerometer"])
+        gyro_path = find_file(["gyroscope"])
+        gps_path = find_file(["location"])
 
-        # Predict
-        X_pred = features_df.drop(columns=["label", "start_time", "end_time", "estimated_iri", "latitude", "longitude"], errors="ignore")
-        features_df["prediction"] = model.predict(X_pred)
+        if not accel_path or not gyro_path or not gps_path:
+            st.error("One or more required files not found in the ZIP. Make sure it includes Accelerometer.csv, Gyroscope.csv, and Location.csv.")
+        else:
+            # --- Merge ---
+            accel = pd.read_csv(accel_path)
+            gyro = pd.read_csv(gyro_path)
+            gps = pd.read_csv(gps_path)
 
-        # ========================
-        # Section: Data Table
-        # ========================
-        with st.expander("📊 View Extracted Segment Data"):
-            st.dataframe(features_df[["readable_time", "mean_speed", "prediction"]])
+            for df in [accel, gyro, gps]:
+                df.rename(columns={df.columns[0]: "timestamp"}, inplace=True)
+                df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
+                if df["timestamp"].max() > 1e15:
+                    df["timestamp"] = df["timestamp"] / 1_000_000
+                df.sort_values("timestamp", inplace=True)
+                df.drop(columns=[col for col in df.columns if "elapsed" in col.lower()], inplace=True)
 
-        # ========================
-        # Section: Pie Chart
-        # ========================
-        with st.expander("🧮 Class Distribution Pie Chart"):
-            fig, ax = plt.subplots()
-            features_df["prediction"].value_counts().plot.pie(autopct="%1.1f%%", ax=ax)
-            ax.set_ylabel("")
-            ax.set_title("Predicted Road Surface Distribution")
-            st.pyplot(fig)
+            merged = pd.merge_asof(accel, gyro, on="timestamp", direction="nearest", tolerance=50)
+            merged = pd.merge_asof(merged, gps, on="timestamp", direction="nearest", tolerance=200)
+            merged.dropna(inplace=True)
+            merged.insert(0, "readable_time", pd.to_datetime(merged["timestamp"], unit='ms') + timedelta(hours=8))
+            raw_df = merged.copy()
 
-        # ========================
-        # Section: Map
-        # ========================
-        st.subheader("🗺️ Map View of Road Segments")
-        m = folium.Map(location=[features_df["latitude"].mean(), features_df["longitude"].mean()], zoom_start=15, tiles="CartoDB dark_matter")
-        marker_cluster = MarkerCluster().add_to(m)
+            # --- Feature Extraction ---
+            df = raw_df.rename(columns={
+                'x_x': 'accel_x',
+                'y_x': 'accel_y',
+                'z_x': 'accel_z',
+                'x_y': 'gyro_x',
+                'y_y': 'gyro_y',
+                'z_y': 'gyro_z'
+            })
+            df = df.dropna().sort_values("timestamp").reset_index(drop=True)
 
-        color_map = {"Smooth": "green", "Fair": "blue", "Rough": "red"}
+            segments = []
+            window_size = 200
+            for i in range(0, len(df) - window_size, window_size):
+                window = df.iloc[i:i+window_size]
+                if window['speed'].mean() >= 5:
+                    y_filtered = window['accel_y'].rolling(window=5, center=True).mean().bfill().ffill()
+                    features = {
+                        'start_time': window['timestamp'].iloc[0],
+                        'end_time': window['timestamp'].iloc[-1],
+                        'mean_accel_y': y_filtered.mean(),
+                        'std_accel_y': y_filtered.std(),
+                        'rms_accel_y': np.sqrt(np.mean(y_filtered**2)),
+                        'peak2peak_accel_y': y_filtered.max() - y_filtered.min(),
+                        'mean_speed': window['speed'].mean() * 3.6,
+                        'elevation_change': window['altitude'].iloc[-1] - window['altitude'].iloc[0] if 'altitude' in window else 0,
+                        'gyro_y_std': window['gyro_y'].std(),
+                        'gyro_x_std': window['gyro_x'].std(),
+                        'latitude': window['latitude'].mean(),
+                        'longitude': window['longitude'].mean()
+                    }
+                    segments.append(features)
 
-        for i, row in features_df.iterrows():
-            folium.CircleMarker(
-                location=[row["latitude"], row["longitude"]],
-                radius=5,
-                color=color_map.get(row["prediction"], "gray"),
-                fill=True,
-                fill_opacity=0.7,
-                popup=f"{row['readable_time']}: {row['prediction']}"
-            ).add_to(marker_cluster)
+            features_df = pd.DataFrame(segments)
+            if features_df.empty:
+                st.warning("No valid segments extracted (check if speed > 5 km/h).")
+                st.stop()
 
-        st_folium(m, width=1100, height=500)
+            # --- Prediction ---
+            model = joblib.load("iri_rf_classifier_cleaned.pkl")
+            X_pred = features_df.drop(columns=["start_time", "end_time", "latitude", "longitude"], errors="ignore")
+            features_df["prediction"] = model.predict(X_pred)
 
-else:
-    st.info("Please upload a ZIP file containing the 3 sensor CSVs.")
+            # --- Add readable_time ---
+            if "readable_time" in raw_df.columns:
+                time_lookup = raw_df[["timestamp", "readable_time"]].drop_duplicates()
+                features_df = features_df.merge(time_lookup, left_on="start_time", right_on="timestamp", how="left")
+                features_df.drop(columns=["timestamp"], inplace=True)
+
+            # --- Sidebar display options ---
+            st.sidebar.title("🧭 Display Options")
+            show_data = st.sidebar.checkbox("Show Extracted Data", value=True)
+            show_pie = st.sidebar.checkbox("Show Pie Chart", value=True)
+            show_map = st.sidebar.checkbox("Show Map View", value=True)
+
+            # --- Show extracted data ---
+            if show_data:
+                st.subheader("📊 Segment-wise Prediction")
+                available_cols = [c for c in ["readable_time", "mean_speed", "prediction"] if c in features_df.columns]
+                st.dataframe(features_df[available_cols])
+
+            # --- Pie chart ---
+            if show_pie:
+                st.subheader("📎 Road Condition Distribution")
+                fig, ax = plt.subplots()
+                features_df["prediction"].value_counts().plot.pie(autopct='%1.1f%%', ax=ax, startangle=90)
+                ax.set_ylabel('')
+                ax.set_title("Predicted Segment Labels")
+                st.pyplot(fig)
+
+            # --- Map view ---
+            if show_map and "latitude" in features_df.columns and "longitude" in features_df.columns:
+                st.subheader("🗺️ Map View of Road Segments")
+                color_map = {
+                    "Smooth": "green",
+                    "Fair": "blue",
+                    "Rough": "red"
+                }
+                m = folium.Map(location=[features_df["latitude"].mean(), features_df["longitude"].mean()], zoom_start=15, tiles="CartoDB dark_matter")
+
+                for _, row in features_df.iterrows():
+                    folium.CircleMarker(
+                        location=[row["latitude"], row["longitude"]],
+                        radius=5,
+                        color=color_map.get(row["prediction"], "gray"),
+                        fill=True,
+                        fill_opacity=0.8
+                    ).add_to(m)
+
+                st_folium(m, width=1100, height=500)
