@@ -1,6 +1,7 @@
-streamlit
 pandas
 numpy
-joblib
-pydeck
 scikit-learn
+joblib
+folium
+streamlit-folium
+streamlit
