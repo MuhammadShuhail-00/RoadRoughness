@@ -5,4 +5,4 @@ joblib
 matplotlib
 folium
 streamlit-folium
-scikit-learn==1.6.1
+scikit-learn
