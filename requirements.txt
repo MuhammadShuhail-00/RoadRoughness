@@ -5,3 +5,4 @@ joblib
 folium
 streamlit-folium
 streamlit
+matplotlib
