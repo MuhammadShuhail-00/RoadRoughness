@@ -142,7 +142,11 @@ if zip_file:
                     "Fair": "blue",
                     "Rough": "red"
                 }
-                m = folium.Map(location=[features_df["latitude"].mean(), features_df["longitude"].mean()], zoom_start=15, tiles="CartoDB dark_matter")
+                m = folium.Map(
+                    location=[features_df["latitude"].mean(), features_df["longitude"].mean()],
+                    zoom_start=15,
+                    tiles="OpenStreetMap"  # ✅ Light mode map
+                )
 
                 for _, row in features_df.iterrows():
                     folium.CircleMarker(
