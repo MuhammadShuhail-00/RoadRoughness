@@ -145,10 +145,12 @@ if zip_file:
 
             # Summary Metrics
             st.markdown("### 📈 Summary")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Segments", len(features_df))
-            col2.metric("Smooth", sum(features_df["prediction"] == "Smooth"))
-            col3.metric("Rough", sum(features_df["prediction"] == "Rough"))
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("🧮 Total Segments", len(features_df))
+            col2.metric("✅ Smooth", sum(features_df["prediction"] == "Smooth"))
+            col3.metric("🟦 Fair", sum(features_df["prediction"] == "Fair"))
+            col4.metric("❌ Rough", sum(features_df["prediction"] == "Rough"))
+
 
             # Show data
             if show_data:
