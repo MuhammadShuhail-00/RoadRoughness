@@ -1,65 +1,66 @@
 # model_utils.py
-import os
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
 import numpy as np
+from sklearn.preprocessing import StandardScaler
+from datetime import timedelta
 
-def extract_features_from_files(directory):
-    try:
-        csv_files = os.listdir(directory)
-        acc_file = [f for f in csv_files if "accelerometer" in f.lower()][0]
-        gyro_file = [f for f in csv_files if "gyroscope" in f.lower()][0]
-        gps_file = [f for f in csv_files if "location" in f.lower()][0]
+def merge_and_extract_features(accel, gyro, gps):
+    # Preprocess timestamps
+    for df in [accel, gyro, gps]:
+        df.rename(columns={df.columns[0]: "timestamp"}, inplace=True)
+        df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
+        if df["timestamp"].max() > 1e15:
+            df["timestamp"] = df["timestamp"] / 1_000_000
+        df.sort_values("timestamp", inplace=True)
+        df.drop(columns=[col for col in df.columns if "elapsed" in col.lower()], inplace=True)
 
-        acc = pd.read_csv(os.path.join(directory, acc_file))
-        gyro = pd.read_csv(os.path.join(directory, gyro_file))
-        gps = pd.read_csv(os.path.join(directory, gps_file))
+    # Merge sensor data
+    merged = pd.merge_asof(accel, gyro, on="timestamp", direction="nearest", tolerance=50)
+    merged = pd.merge_asof(merged, gps, on="timestamp", direction="nearest", tolerance=200)
+    merged.dropna(inplace=True)
+    merged.insert(0, "readable_time", pd.to_datetime(merged["timestamp"], unit='ms') + timedelta(hours=8))
 
-        # Normalize all column names (lowercase, no spaces)
-        acc.columns = acc.columns.str.strip().str.lower()
-        gyro.columns = gyro.columns.str.strip().str.lower()
-        gps.columns = gps.columns.str.strip().str.lower()
+    # Rename for consistency
+    df = merged.rename(columns={
+        'x_x': 'accel_x',
+        'y_x': 'accel_y',
+        'z_x': 'accel_z',
+        'x_y': 'gyro_x',
+        'y_y': 'gyro_y',
+        'z_y': 'gyro_z'
+    }).dropna().sort_values("timestamp").reset_index(drop=True)
 
-        # Rename common column alternatives for robustness
-        if 'accel_y' not in acc.columns and 'y' in acc.columns:
-            acc = acc.rename(columns={'y': 'accel_y'})
-        if 'gyro_x' not in gyro.columns and 'x' in gyro.columns:
-            gyro = gyro.rename(columns={'x': 'gyro_x'})
-        if 'gyro_y' not in gyro.columns and 'y' in gyro.columns:
-            gyro = gyro.rename(columns={'y': 'gyro_y'})
-        if 'altitude' not in gps.columns and 'alt' in gps.columns:
-            gps = gps.rename(columns={'alt': 'altitude'})
+    # Segment-wise feature extraction
+    segments = []
+    window_size = 200
+    for i in range(0, len(df) - window_size, window_size):
+        window = df.iloc[i:i+window_size]
+        if window['speed'].mean() >= 5:
+            y_filtered = window['accel_y'].rolling(window=5, center=True).mean().bfill().ffill()
+            features = {
+                'start_time': window['timestamp'].iloc[0],
+                'end_time': window['timestamp'].iloc[-1],
+                'mean_accel_y': y_filtered.mean(),
+                'std_accel_y': y_filtered.std(),
+                'rms_accel_y': np.sqrt(np.mean(y_filtered**2)),
+                'peak2peak_accel_y': y_filtered.max() - y_filtered.min(),
+                'mean_speed': window['speed'].mean() * 3.6,
+                'elevation_change': window['altitude'].iloc[-1] - window['altitude'].iloc[0] if 'altitude' in window else 0,
+                'gyro_y_std': window['gyro_y'].std(),
+                'gyro_x_std': window['gyro_x'].std(),
+                'latitude': window['latitude'].mean(),
+                'longitude': window['longitude'].mean()
+            }
+            segments.append(features)
 
-        # Check for required columns
-        required_acc_cols = ['accel_y']
-        required_gyro_cols = ['gyro_x', 'gyro_y']
-        required_gps_cols = ['speed', 'altitude']
-        for col in required_acc_cols + required_gyro_cols + required_gps_cols:
-            if col not in pd.concat([acc, gyro, gps], axis=1).columns:
-                raise ValueError(f"Missing required column: {col}")
+    return pd.DataFrame(segments)
 
-        # Feature extraction
-        features = pd.DataFrame({
-            'mean_speed': [gps['speed'].mean()],
-            'std_accel_y': [acc['accel_y'].std()],
-            'mean_accel_y': [acc['accel_y'].mean()],
-            'ms_accel_y': [(acc['accel_y'] ** 2).mean()],
-            'gyro_x_std': [gyro['gyro_x'].std()],
-            'gyro_y_std': [gyro['gyro_y'].std()],
-            'peak2peak_accel_y': [acc['accel_y'].max() - acc['accel_y'].min()],
-            'elevation_change': [gps['altitude'].max() - gps['altitude'].min()],
-        })
 
-        return features
-
-    except Exception as e:
-        print("Feature extraction error:", e)
-        return pd.DataFrame()
-
-def predict_with_model(model, features, label_encoder):
+def predict_with_model(model, features_df, label_encoder):
+    features_df_cleaned = features_df.drop(columns=["start_time", "end_time", "latitude", "longitude", "readable_time"], errors="ignore")
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(features)
+    X_scaled = scaler.fit_transform(features_df_cleaned)
     y_pred_encoded = model.predict(X_scaled)
     y_pred = label_encoder.inverse_transform(y_pred_encoded)
-    features['Prediction'] = y_pred
-    return y_pred, features
+    features_df["Prediction"] = y_pred
+    return y_pred, features_df
