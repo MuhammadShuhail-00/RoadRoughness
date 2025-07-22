@@ -1,11 +1,10 @@
+# app.py
 import streamlit as st
 import os
 import zipfile
 import tempfile
 import pandas as pd
 import joblib
-import pydeck as pdk
-import plotly.express as px
 from model_utils import extract_features_from_zip
 from sklearn.preprocessing import LabelEncoder
 
@@ -19,28 +18,28 @@ MODELS = {
 # Load label encoder (only used for XGBoost)
 label_encoder = joblib.load("models/label_encoder.pkl")
 
-# Streamlit UI setup
+# UI Setup
 st.set_page_config(page_title="Road Surface Roughness Detection", layout="wide")
-st.title("Road Surface Roughness Detection")
+st.title("Road Surface Roughness Detection App")
 
-# Sidebar selections
+# Sidebar options
 model_choice = st.sidebar.selectbox("Select a model", list(MODELS.keys()))
+show_map = st.sidebar.checkbox("Show Map", value=True)
 show_pie = st.sidebar.checkbox("Show Pie Chart", value=True)
 show_bar = st.sidebar.checkbox("Show Bar Chart", value=True)
-show_map = st.sidebar.checkbox("Show Map", value=True)
+show_true = st.sidebar.checkbox("Show IRI & True Label", value=True)
 
 model = MODELS[model_choice]
 
-# File uploader
-st.markdown("Upload ZIP file with Accelerometer, Gyroscope, and Location CSVs")
-uploaded_zip = st.file_uploader("Upload your road session ZIP file", type="zip")
+# File upload
+st.markdown("Upload ZIP file containing Accelerometer, Gyroscope, and Location CSVs")
+uploaded_zip = st.file_uploader("Upload your ZIP file", type="zip")
 
 if uploaded_zip is not None:
     with tempfile.TemporaryDirectory() as tmpdir:
         zip_path = os.path.join(tmpdir, "data.zip")
         with open(zip_path, "wb") as f:
             f.write(uploaded_zip.read())
-
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(tmpdir)
 
@@ -48,75 +47,81 @@ if uploaded_zip is not None:
             df_features = extract_features_from_zip(tmpdir)
 
             if df_features.empty:
-                st.error("❌ No features extracted. Check file naming and content.")
+                st.error("❌ No valid features extracted.")
             else:
-                # Prepare input for prediction
-                X_input = df_features.drop(columns=["start_time", "end_time", "latitude", "longitude"])
+                # Prediction
+                X_input = df_features.drop(columns=["start_time", "end_time", "latitude", "longitude"], errors="ignore")
 
-                # Predict
                 if "XGBoost" in model_choice:
                     y_pred_encoded = model.predict(X_input)
                     y_pred = label_encoder.inverse_transform(y_pred_encoded)
                 else:
                     y_pred = model.predict(X_input)
 
-                df_features["Prediction"] = y_pred
+                df_features['Prediction'] = y_pred
 
-                # Results
+                # --- Add IRI estimation and label ---
+                df_features["estimated_iri"] = 5.132 * df_features["rms_accel_y"] + 1.112
+
+                def iri_to_label(iri):
+                    if iri <= 2.0:
+                        return "Smooth"
+                    elif iri <= 3.5:
+                        return "Fair"
+                    else:
+                        return "Rough"
+
+                df_features["True_Label"] = df_features["estimated_iri"].apply(iri_to_label)
+
                 st.success("✅ Prediction completed.")
+
                 st.subheader("Prediction Results")
-                st.dataframe(df_features)
+                if show_true:
+                    st.dataframe(df_features)
+                else:
+                    st.dataframe(df_features.drop(columns=["True_Label", "estimated_iri"], errors="ignore"))
 
-                # Summary
-                summary = df_features['Prediction'].value_counts().reset_index()
-                summary.columns = ['Surface Condition', 'Segment Count']
-
-                # Show bar chart
-                if show_bar:
-                    st.subheader("Roughness Distribution")
-                    st.bar_chart(summary.set_index('Surface Condition'))
-
-                # Show pie chart
+                # Pie Chart
                 if show_pie:
-                    st.subheader("Pie Chart Distribution")
-                    fig_pie = px.pie(
-                        summary,
-                        names='Surface Condition',
-                        values='Segment Count',
-                        color='Surface Condition',
-                        color_discrete_map={"Smooth": "green", "Fair": "blue", "Rough": "red"},
-                    )
-                    st.plotly_chart(fig_pie)
+                    st.subheader("Road Condition Distribution (Pie Chart)")
+                    pie_data = df_features['Prediction'].value_counts()
+                    st.pyplot(pie_data.plot.pie(autopct='%1.1f%%', figsize=(5, 5), title="Predicted Conditions").get_figure())
 
-                # Show map
-                if show_map:
-                    st.subheader("Segment Location Map")
-                    color_map = {"Smooth": [0, 255, 0], "Fair": [0, 112, 255], "Rough": [255, 0, 0]}
-                    df_features["color"] = df_features["Prediction"].map(color_map)
+                # Bar Chart
+                if show_bar:
+                    st.subheader("Road Condition Summary (Bar Chart)")
+                    bar_data = df_features['Prediction'].value_counts().reset_index()
+                    bar_data.columns = ['Surface Condition', 'Segment Count']
+                    st.bar_chart(bar_data.set_index("Surface Condition"))
 
-                    layer = pdk.Layer(
-                        "ScatterplotLayer",
-                        data=df_features,
-                        get_position='[longitude, latitude]',
-                        get_color='color',
-                        get_radius=8,
-                        pickable=True
-                    )
+                # Map View
+                if show_map and "latitude" in df_features.columns and "longitude" in df_features.columns:
+                    import folium
+                    from streamlit_folium import st_folium
 
-                    view_state = pdk.ViewState(
-                        latitude=df_features["latitude"].mean(),
-                        longitude=df_features["longitude"].mean(),
-                        zoom=16,
-                        pitch=0
-                    )
+                    st.subheader("Map View of Predicted Segments")
 
-                    deck = pdk.Deck(
-                        layers=[layer],
-                        initial_view_state=view_state,
-                        map_style="light",
-                        tooltip={"text": "{Prediction}"}
-                    )
-                    st.pydeck_chart(deck)
+                    color_map = {
+                        "Smooth": "green",
+                        "Fair": "blue",
+                        "Rough": "red"
+                    }
+
+                    m = folium.Map(location=[
+                        df_features["latitude"].mean(),
+                        df_features["longitude"].mean()
+                    ], zoom_start=15, tiles="CartoDB positron")
+
+                    for _, row in df_features.iterrows():
+                        folium.CircleMarker(
+                            location=[row["latitude"], row["longitude"]],
+                            radius=4,
+                            color=color_map.get(row["Prediction"], "gray"),
+                            fill=True,
+                            fill_opacity=0.8
+                        ).add_to(m)
+
+                    st_folium(m, height=500, width=1100)
 
         except Exception as e:
-            st.error(f"❌ Feature extraction or prediction error: {e}")
+            st.error(f"❌ Error during processing: {e}")
