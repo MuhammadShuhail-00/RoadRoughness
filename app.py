@@ -5,22 +5,19 @@ import zipfile
 import tempfile
 import pandas as pd
 import joblib
+from model_utils import merge_and_extract_features, predict_with_model
+
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import classification_report
-from model_utils import extract_features_from_files, predict_with_model
 
-
-# Load label encoder
+# Load label encoder and models
 label_encoder = joblib.load("models/label_encoder.pkl")
-
-# Load models
 MODELS = {
     "SVM (Model 4)": joblib.load("models/svm4_model.pkl"),
     "Random Forest (Model 1)": joblib.load("models/rf1_model.pkl"),
     "XGBoost (Model 2)": joblib.load("models/xgb2_model.pkl")
 }
 
-# Streamlit UI
+# Streamlit UI setup
 st.set_page_config(page_title="Road Surface Roughness Detection", layout="wide")
 st.title("Road Surface Roughness Detection")
 
@@ -28,40 +25,57 @@ st.title("Road Surface Roughness Detection")
 model_choice = st.sidebar.selectbox("Select a model", list(MODELS.keys()))
 model = MODELS[model_choice]
 
-# File uploader
+# Upload ZIP file
 st.markdown("Upload ZIP file with Accelerometer, Gyroscope, and Location CSVs")
 uploaded_zip = st.file_uploader("Upload your road session ZIP file", type="zip")
 
-if uploaded_zip is not None:
+if uploaded_zip:
     with tempfile.TemporaryDirectory() as tmpdir:
-        zip_path = os.path.join(tmpdir, "data.zip")
+        zip_path = os.path.join(tmpdir, "uploaded.zip")
         with open(zip_path, "wb") as f:
-            f.write(uploaded_zip.getbuffer())
+            f.write(uploaded_zip.read())
 
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(tmpdir)
 
-        # Extract features from the extracted files
-        try:
-            df_features = extract_features_from_files(tmpdir)
+        def find_file(keywords):
+            for root, _, files in os.walk(tmpdir):
+                for file in files:
+                    fname = file.lower()
+                    if all(k in fname for k in keywords):
+                        return os.path.join(root, file)
+            return None
 
-            if df_features.empty:
-                st.error("❌ No features extracted. Check file naming and content.")
-            else:
-                # Predict and display results
-                predictions, df_pred = predict_with_model(model, df_features, label_encoder)
-                st.success("✅ Prediction completed.")
+        accel_path = find_file(["accelerometer"])
+        gyro_path = find_file(["gyroscope"])
+        gps_path = find_file(["location"])
 
-                st.subheader("Prediction Results")
-                st.dataframe(df_pred)
+        if not accel_path or not gyro_path or not gps_path:
+            st.error("❌ Required files not found: Accelerometer, Gyroscope, Location CSVs.")
+        else:
+            try:
+                accel = pd.read_csv(accel_path)
+                gyro = pd.read_csv(gyro_path)
+                gps = pd.read_csv(gps_path)
 
-                st.subheader("Roughness Summary")
-                summary = df_pred['Prediction'].value_counts().reset_index()
-                summary.columns = ['Surface Condition', 'Segment Count']
-                st.dataframe(summary)
+                df_features = merge_and_extract_features(accel, gyro, gps)
 
-                st.subheader("Roughness Distribution")
-                st.bar_chart(summary.set_index('Surface Condition'))
+                if df_features.empty:
+                    st.error("❌ No features extracted. Please check data quality and file format.")
+                else:
+                    predictions, df_pred = predict_with_model(model, df_features, label_encoder)
+                    st.success("✅ Prediction completed.")
 
-        except Exception as e:
-            st.error(f"❌ Error processing file: {e}")
+                    st.subheader("Prediction Results")
+                    st.dataframe(df_pred)
+
+                    st.subheader("Roughness Summary")
+                    summary = df_pred['Prediction'].value_counts().reset_index()
+                    summary.columns = ['Surface Condition', 'Segment Count']
+                    st.dataframe(summary)
+
+                    st.subheader("Roughness Distribution")
+                    st.bar_chart(summary.set_index('Surface Condition'))
+
+            except Exception as e:
+                st.error(f"❌ Feature extraction or prediction error: {e}")
