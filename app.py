@@ -10,30 +10,20 @@ import folium
 from streamlit_folium import st_folium
 from datetime import timedelta
 
-# Page config
+# Set page config
 st.set_page_config(page_title="Road Roughness Detection", layout="wide")
+st.title("🚗 Road Surface Roughness Detection App")
+st.markdown("Upload a **.zip** file containing `Accelerometer.csv`, `Gyroscope.csv`, and `Location.csv`.")
 
-# Styling
-st.markdown("""
-    <style>
-        .centered-title {
-            text-align: center;
-            font-size:30px !important;
-            color: #006699;
-        }
-        .subtext {
-            text-align: center;
-            color: gray;
-            font-size: 15px;
-            margin-bottom: 25px;
-        }
-    </style>
-""", unsafe_allow_html=True)
+# --- Upload zip file ---
+zip_file = st.file_uploader("Upload sensor ZIP file", type="zip")
 
-st.markdown("<div class='centered-title'>🚗 Road Surface Roughness Detection App</div>", unsafe_allow_html=True)
-st.markdown("<div class='subtext'>Upload a ZIP file with Accelerometer, Gyroscope, and Location CSV files.</div>", unsafe_allow_html=True)
-
-zip_file = st.file_uploader("📥 Upload sensor ZIP file", type="zip")
+model_choice = st.sidebar.selectbox("Choose Model", ["SVM4", "RF1", "XGB2"])
+model_files = {
+    "SVM4": "svm4_model.pkl",
+    "RF1": "rf1_model.pkl",
+    "XGB2": "xgb2_model.pkl"
+}
 
 if zip_file:
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -57,9 +47,8 @@ if zip_file:
         gps_path = find_file(["location"])
 
         if not accel_path or not gyro_path or not gps_path:
-            st.error("Required files not found: Accelerometer, Gyroscope, Location CSVs.")
+            st.error("One or more required files not found in the ZIP.")
         else:
-            # Merge sensor data
             accel = pd.read_csv(accel_path)
             gyro = pd.read_csv(gyro_path)
             gps = pd.read_csv(gps_path)
@@ -78,14 +67,9 @@ if zip_file:
             merged.insert(0, "readable_time", pd.to_datetime(merged["timestamp"], unit='ms') + timedelta(hours=8))
             raw_df = merged.copy()
 
-            # Feature extraction
             df = raw_df.rename(columns={
-                'x_x': 'accel_x',
-                'y_x': 'accel_y',
-                'z_x': 'accel_z',
-                'x_y': 'gyro_x',
-                'y_y': 'gyro_y',
-                'z_y': 'gyro_z'
+                'x_x': 'accel_x', 'y_x': 'accel_y', 'z_x': 'accel_z',
+                'x_y': 'gyro_x', 'y_y': 'gyro_y', 'z_y': 'gyro_z'
             }).dropna().sort_values("timestamp").reset_index(drop=True)
 
             segments = []
@@ -112,58 +96,48 @@ if zip_file:
 
             features_df = pd.DataFrame(segments)
             if features_df.empty:
-                st.warning("No valid segments found. Try uploading a different dataset.")
+                st.warning("No valid segments extracted (check if speed > 5 km/h).")
                 st.stop()
 
-            # Load SVM 4 model
-            model = joblib.load("svm4_model.pkl")
+            model_path = model_files[model_choice]
+            model = joblib.load(model_path)
 
-            # Predict
             X_pred = features_df.drop(columns=["start_time", "end_time", "latitude", "longitude"], errors="ignore")
             features_df["prediction"] = model.predict(X_pred)
 
-            # Time mapping
             if "readable_time" in raw_df.columns:
                 time_lookup = raw_df[["timestamp", "readable_time"]].drop_duplicates()
                 features_df = features_df.merge(time_lookup, left_on="start_time", right_on="timestamp", how="left")
                 features_df.drop(columns=["timestamp"], inplace=True)
 
-            # Display toggles
             st.sidebar.title("🧭 Display Options")
-            show_data = st.sidebar.checkbox("📋 Show Segment Data", value=True)
-            show_pie = st.sidebar.checkbox("📊 Show Pie Chart", value=True)
-            show_map = st.sidebar.checkbox("🗺️ Show Map View", value=True)
+            show_data = st.sidebar.checkbox("Show Extracted Data", value=True)
+            show_pie = st.sidebar.checkbox("Show Pie Chart", value=True)
+            show_map = st.sidebar.checkbox("Show Map View", value=True)
 
-            # Summary
-            st.markdown("### 📈 Summary")
+            st.subheader("📈 Summary")
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Total Segments", len(features_df))
             col2.metric("Smooth", sum(features_df["prediction"] == "Smooth"))
             col3.metric("Fair", sum(features_df["prediction"] == "Fair"))
             col4.metric("Rough", sum(features_df["prediction"] == "Rough"))
 
-            # Segment Data
             if show_data:
-                st.markdown("### 📋 Segment Predictions")
+                st.subheader("📋 Segment Predictions")
                 st.dataframe(features_df[["readable_time", "mean_speed", "prediction"]])
 
-            # Pie Chart
             if show_pie:
-                st.markdown("### 📎 Road Condition Distribution")
+                st.subheader("📎 Road Condition Distribution")
                 fig, ax = plt.subplots()
                 features_df["prediction"].value_counts().plot.pie(autopct='%1.1f%%', ax=ax, startangle=90)
                 ax.set_ylabel('')
+                ax.set_title("Predicted Segment Labels")
                 st.pyplot(fig)
 
-            # Map View
-            if show_map and "latitude" in features_df and "longitude" in features_df:
-                st.markdown("### 🗺️ Segment Map")
+            if show_map and "latitude" in features_df.columns and "longitude" in features_df.columns:
+                st.subheader("🗺️ Map View of Road Segments")
                 color_map = {"Smooth": "green", "Fair": "blue", "Rough": "red"}
-                m = folium.Map(
-                    location=[features_df["latitude"].mean(), features_df["longitude"].mean()],
-                    zoom_start=15,
-                    tiles="OpenStreetMap"
-                )
+                m = folium.Map(location=[features_df["latitude"].mean(), features_df["longitude"].mean()], zoom_start=15, tiles="OpenStreetMap")
                 for _, row in features_df.iterrows():
                     folium.CircleMarker(
                         location=[row["latitude"], row["longitude"]],
