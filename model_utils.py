@@ -1,21 +1,27 @@
-# model_utils.py
 import os
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 import numpy as np
+import streamlit as st
 
 def extract_features_from_files(directory):
     try:
         csv_files = os.listdir(directory)
-        acc_file = [f for f in csv_files if "accelerometer" in f.lower()][0]
-        gyro_file = [f for f in csv_files if "gyroscope" in f.lower()][0]
-        gps_file = [f for f in csv_files if "location" in f.lower()][0]
+        st.write("📂 Files in ZIP:", csv_files)  # Debug output
+
+        acc_file = next((f for f in csv_files if "accelerometer" in f.lower()), None)
+        gyro_file = next((f for f in csv_files if "gyroscope" in f.lower()), None)
+        gps_file = next((f for f in csv_files if "location" in f.lower()), None)
+
+        if not acc_file or not gyro_file or not gps_file:
+            st.error("❌ Required sensor files not found. Please ensure filenames include 'accelerometer', 'gyroscope', and 'location'.")
+            return pd.DataFrame()
 
         acc = pd.read_csv(os.path.join(directory, acc_file))
         gyro = pd.read_csv(os.path.join(directory, gyro_file))
         gps = pd.read_csv(os.path.join(directory, gps_file))
 
-        # Example feature extraction (replace with actual logic)
+        # Basic Feature Extraction (can be extended)
         features = pd.DataFrame({
             'mean_speed': [gps['speed'].mean()],
             'std_accel_y': [acc['accel_y'].std()],
@@ -28,8 +34,9 @@ def extract_features_from_files(directory):
         })
 
         return features
+
     except Exception as e:
-        print("Feature extraction error:", e)
+        st.error(f"❌ Feature extraction error: {e}")
         return pd.DataFrame()
 
 def predict_with_model(model, features, label_encoder):
