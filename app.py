@@ -7,7 +7,8 @@ import pandas as pd
 import joblib
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import classification_report
-from utils.model_utils import extract_features_from_files, predict_with_model
+from model_utils import extract_features_from_files, predict_with_model
+
 
 # Load label encoder
 label_encoder = joblib.load("models/label_encoder.pkl")
