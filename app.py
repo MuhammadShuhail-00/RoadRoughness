@@ -82,7 +82,11 @@ if uploaded_zip is not None:
 
                 # Map Visualization
                 st.subheader("Map of Segments")
-                color_map = {"Smooth": [0, 255, 0], "Fair": [255, 255, 0], "Rough": [255, 0, 0]}
+                color_map = {
+                    "Smooth": [0, 255, 0],      # Green
+                    "Fair": [0, 122, 255],      # Blue
+                    "Rough": [255, 0, 0]        # Red
+                }
                 df_features["color"] = df_features["Prediction"].map(color_map)
 
                 layer = pdk.Layer(
@@ -101,7 +105,11 @@ if uploaded_zip is not None:
                     pitch=0
                 )
 
-                st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state))
+                st.pydeck_chart(pdk.Deck(
+                    layers=[layer],
+                    initial_view_state=view_state,
+                    map_style="light"
+                ))
 
         except Exception as e:
             st.error(f"❌ Feature extraction or prediction error: {e}")
