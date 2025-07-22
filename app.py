@@ -1,83 +1,80 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib
-import zipfile
 import os
-import tempfile
-import folium
-from folium.plugins import MarkerCluster
-from streamlit_folium import st_folium
+import zipfile
+import joblib
+
 from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import classification_report
 
-# Load models and label encoder
+from model_utils import extract_features_from_files, predict_with_model
+
+# Load models
+svm_model = joblib.load("models/iri_svm4.pkl")
+rf_model = joblib.load("models/iri_rf1.pkl")
+xgb_model = joblib.load("models/iri_xgb2.pkl")
 label_encoder = joblib.load("label_encoder.pkl")
-models = {
-    "SVM 4": joblib.load("svm4_model.pkl"),
-    "RF 1": joblib.load("rf1_model.pkl"),
-    "XGB 2": joblib.load("xgb2_model.pkl")
-}
 
-# Optional fix to handle unseen label error
-int_to_label = {i: label for i, label in enumerate(label_encoder.classes_)}
-
-st.set_page_config(page_title="Road Roughness Detection", layout="wide")
+# App title
 st.title("🚗 Road Surface Roughness Detection App")
+st.markdown("Upload your accelerometer, gyroscope, and location data in a ZIP file.")
 
-# Sidebar model selection
+# Sidebar
 st.sidebar.title("Model Selector")
-model_name = st.sidebar.selectbox("Choose a model to use", list(models.keys()))
-model = models[model_name]
+model_name = st.sidebar.radio("Choose model:", ("SVM 4", "Random Forest 1", "XGBoost 2"))
 
-uploaded_file = st.file_uploader("Upload ZIP file with Accelerometer, Gyroscope, and Location CSVs", type="zip")
+# File uploader
+uploaded_zip = st.file_uploader("Upload ZIP file with Accelerometer, Gyroscope, and Location CSVs", type="zip")
 
-if uploaded_file is not None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        zip_path = os.path.join(tmpdir, "uploaded.zip")
-        with open(zip_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(tmpdir)
+if uploaded_zip:
+    with zipfile.ZipFile(uploaded_zip, "r") as zip_ref:
+        tmpdir = "temp_zip"
+        zip_ref.extractall(tmpdir)
 
-        csv_files = [os.path.join(tmpdir, file) for file in os.listdir(tmpdir) if file.endswith(".csv")]
-        location_file = [f for f in csv_files if "location" in f.lower()][0]
-        sensor_file = [f for f in csv_files if "feature" in f.lower()][0]
+    # List CSVs from extracted zip
+    csv_files = [os.path.join(tmpdir, f) for f in os.listdir(tmpdir) if f.endswith(".csv")]
 
-        # Load data
-        df_features = pd.read_csv(sensor_file)
-        df_location = pd.read_csv(location_file)
+    try:
+        accel_file = [f for f in csv_files if "accel" in f.lower()][0]
+        gyro_file = [f for f in csv_files if "gyro" in f.lower()][0]
+        gps_file = [f for f in csv_files if "location" in f.lower() or "gps" in f.lower()][0]
+    except IndexError:
+        st.error("❌ ZIP must contain CSVs with 'accel', 'gyro', and 'location' in the filename.")
+        st.stop()
 
-        drop_cols = ["label", "readable_time", "start_time", "end_time", "estimated_iri"]
-        X = df_features.drop(columns=[col for col in drop_cols if col in df_features.columns], errors="ignore")
+    # Extract features
+    st.info("🔄 Extracting features from sensor data...")
+    df_features = extract_features_from_files(accel_file, gyro_file, gps_file)
 
-        # Predict
-        y_pred_encoded = model.predict(X)
-        y_pred = [int_to_label.get(i, str(i)) for i in y_pred_encoded]
-        df_features["Prediction"] = y_pred
+    # Load selected model
+    if model_name == "SVM 4":
+        model = svm_model
+    elif model_name == "Random Forest 1":
+        model = rf_model
+    elif model_name == "XGBoost 2":
+        model = xgb_model
 
-        # Display pie chart
-        st.subheader("🧾 Prediction Summary")
-        pred_count = df_features["Prediction"].value_counts().reset_index()
-        pred_count.columns = ["Label", "Count"]
-        st.dataframe(pred_count)
+    # Predict
+    st.success(f"✅ Using {model_name} to classify road condition...")
+    y_pred_encoded = model.predict(df_features.drop(columns=["readable_time"], errors="ignore"))
+    try:
+        y_pred = label_encoder.inverse_transform(y_pred_encoded)
+    except Exception as e:
+        st.warning("⚠️ Could not decode labels. Showing encoded predictions instead.")
+        y_pred = y_pred_encoded
 
-        st.subheader("📍 Map View of Segments")
-        df_map = pd.merge(df_features, df_location, left_index=True, right_index=True)
+    df_features["Predicted Road Condition"] = y_pred
 
-        m = folium.Map(location=[df_map["latitude"].mean(), df_map["longitude"].mean()], zoom_start=16, control_scale=True)
-        marker_cluster = MarkerCluster().add_to(m)
+    # Show output
+    st.subheader("📊 Prediction Results")
+    st.dataframe(df_features[["readable_time", "Predicted Road Condition"]] if "readable_time" in df_features.columns else df_features[["Predicted Road Condition"]])
 
-        color_map = {"Smooth": "green", "Fair": "orange", "Rough": "red"}
-        for i, row in df_map.iterrows():
-            folium.CircleMarker(
-                location=(row["latitude"], row["longitude"]),
-                radius=4,
-                color=color_map.get(row["Prediction"], "blue"),
-                fill=True,
-                fill_color=color_map.get(row["Prediction"], "blue"),
-                fill_opacity=0.8,
-                popup=f"{row['Prediction']}"
-            ).add_to(marker_cluster)
+    # Summary counts
+    st.write("### 🔍 Summary")
+    st.write(df_features["Predicted Road Condition"].value_counts())
 
-        st_data = st_folium(m, width=700, height=500)
+    # Clean up temp files
+    for f in csv_files:
+        os.remove(f)
+    os.rmdir(tmpdir)
