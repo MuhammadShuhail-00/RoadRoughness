@@ -15,9 +15,9 @@ label_encoder = joblib.load("models/label_encoder.pkl")
 
 # Load models
 MODELS = {
-    "SVM (Model 4)": joblib.load("models/iri_svm4.pkl"),
-    "Random Forest (Model 1)": joblib.load("models/iri_rf1.pkl"),
-    "XGBoost (Model 2)": joblib.load("models/iri_xgb2.pkl")
+    "SVM (Model 4)": joblib.load("models/svm4_model.pkl"),
+    "Random Forest (Model 1)": joblib.load("models/rf1_model.pkl"),
+    "XGBoost (Model 2)": joblib.load("models/xgb2_model.pkl")
 }
 
 # Streamlit UI
