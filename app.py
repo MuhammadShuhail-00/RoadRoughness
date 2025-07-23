@@ -118,7 +118,7 @@ if uploaded_zip is not None:
                             radius=4,
                             color=color_map.get(row["Prediction"], "gray"),
                             fill=True,
-                            fill_opacity=0.8
+                            fill_opacity=0.8,
                             tooltip=folium.Tooltip(row["Prediction"])
                         ).add_to(m)
 
